@@ -3,6 +3,7 @@
 namespace App\Services\Bitunix;
 
 use App\Models\BitunixInvitation;
+use App\Models\BitunixLinkStatistic;
 use App\Models\BitunixOverview;
 use App\Models\BitunixUserRanking;
 use App\Models\IntegrationToken;
@@ -422,6 +423,67 @@ class BitunixPartnerService
         Log::info('BitunixPartnerService.fetchUserRankings', [
             'start' => $start->toDateString(),
             'end' => $end->toDateString(),
+            'rows' => $written,
+        ]);
+
+        return $written;
+    }
+
+    // -------------------------------------------------------------------------
+    // Pipeline 4 — link statistics (cumulative, all-time per VIP code)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Pulls all-time cumulative stats per VIP code from the link_statistics
+     * endpoint. This matches what the partners.bitunix.com UI shows under
+     * "Data Center → Stats → Link Statistics".
+     *
+     * Unlike invitations (which are per-day windowed), this endpoint returns
+     * lifetime totals — click users, registrations, deposits, trades, volume.
+     */
+    public function fetchLinkStatistics(): int
+    {
+        $written = 0;
+        $page = 1;
+        $pageSize = 50;
+
+        do {
+            $result = $this->get('/partner/invite/link_statistics', [
+                'orderType' => 0,
+                'orderDirection' => 'DESC',
+                'page' => $page,
+                'pageSize' => $pageSize,
+            ]);
+
+            $items = $result['items'] ?? [];
+
+            foreach ($items as $row) {
+                if (! is_array($row) || empty($row['vipCode'])) {
+                    continue;
+                }
+
+                BitunixLinkStatistic::updateOrCreate(
+                    ['vip_code' => (string) $row['vipCode']],
+                    [
+                        'customer_vip_code' => $row['customerVipCode'] ?? null,
+                        'click_users' => (int) ($row['clickUsers'] ?? 0),
+                        'registered_users' => (int) ($row['registeredUsers'] ?? 0),
+                        'first_deposit_users' => (int) ($row['firstDepositUsers'] ?? 0),
+                        'first_trade_users' => (int) ($row['firstTransactionUsers'] ?? 0),
+                        'transaction_users' => (int) ($row['transactionUsers'] ?? 0),
+                        'deposit_users' => (int) ($row['depositUsers'] ?? 0),
+                        'trade_amount' => (string) ($row['tradeAmount'] ?? '0'),
+                        'created_at_bitunix' => $row['ctime'] ?? null,
+                        'latest_registration_time' => $row['latestRegistrationTime'] ?? null,
+                    ],
+                );
+                $written++;
+            }
+
+            $page++;
+        } while (count($items) === $pageSize);
+
+        Log::info('BitunixPartnerService.fetchLinkStatistics', [
             'rows' => $written,
         ]);
 

@@ -14,7 +14,7 @@ use Throwable;
     {--days=7 : Fetch the last N days (ignored if --start/--end are given)}
     {--start= : Start date YYYY-MM-DD inclusive (UTC)}
     {--end= : End date YYYY-MM-DD inclusive (UTC); the API uses [start,end+1) internally}
-    {--pipeline=all : overview | invitations | rankings | all}')]
+    {--pipeline=all : overview | invitations | rankings | link-stats | all}')]
 #[Description('Pull Bitunix Partner data into Postgres for the given window.')]
 class FetchBitunixCommand extends Command
 {
@@ -34,7 +34,8 @@ class FetchBitunixCommand extends Command
             'overview' => ['overview'],
             'invitations' => ['invitations'],
             'rankings' => ['rankings'],
-            'all' => ['overview', 'invitations', 'rankings'],
+            'link-stats' => ['link-stats'],
+            'all' => ['overview', 'invitations', 'rankings', 'link-stats'],
             default => $this->fail("unknown --pipeline=$pipeline"),
         };
 
@@ -57,6 +58,7 @@ class FetchBitunixCommand extends Command
                     'overview' => $bitunix->fetchOverview($start, $end),
                     'invitations' => $bitunix->fetchInvitations($start, $end),
                     'rankings' => $bitunix->fetchUserRankings($start, $end),
+                    'link-stats' => $bitunix->fetchLinkStatistics(),
                 };
 
                 $run->markCompleted($count);

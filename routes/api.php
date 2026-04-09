@@ -3,6 +3,7 @@
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\UserController;
 use App\Models\AttributionDaily;
+use App\Models\BitunixLinkStatistic;
 use App\Models\BitunixInvitation;
 use App\Models\BitunixOverview;
 use App\Models\BitunixUserRanking;
@@ -514,6 +515,12 @@ Route::middleware('api.key')->group(function (): void {
                     ->orderByRaw('trade_amount::numeric DESC')
                     ->limit($limit)
                     ->get(),
+            ]);
+        });
+
+        Route::get('/bitunix/link-statistics', function () {
+            return response()->json([
+                'rows' => BitunixLinkStatistic::orderByRaw('trade_amount::numeric DESC')->get(),
             ]);
         });
 
