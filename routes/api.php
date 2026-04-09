@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\UserController;
 use App\Models\AttributionDaily;
 use App\Models\BitunixInvitation;
 use App\Models\BitunixOverview;
@@ -30,6 +32,23 @@ Route::get('/ping', fn (): JsonResponse => response()->json([
     'time' => now()->toIso8601String(),
 ]));
 
+// ===================================================================
+// Auth — Sanctum token-based authentication
+// ===================================================================
+Route::post('/auth/login', [AuthController::class, 'login']);
+
+Route::middleware('auth:sanctum')->group(function (): void {
+    Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::post('/auth/logout', [AuthController::class, 'logout']);
+
+    // User management — admin only
+    Route::middleware('admin')->group(function (): void {
+        Route::get('/users', [UserController::class, 'index']);
+        Route::post('/users', [UserController::class, 'store']);
+        Route::delete('/users/{user}', [UserController::class, 'destroy']);
+    });
+});
+
 Route::middleware('api.key')->group(function (): void {
     Route::get('/me', fn (): JsonResponse => response()->json([
         'ok' => true,
@@ -45,10 +64,18 @@ Route::middleware('api.key')->group(function (): void {
 
         // Default window: last 90 days. Can be overridden via ?days=N
         // or explicit ?start=YYYY-MM-DD&end=YYYY-MM-DD.
+        // Timezone can be overridden via ?tz=Asia/Tokyo (default: Asia/Dubai).
         $window = function (Request $r): array {
+            $tz = $r->query('tz', 'Asia/Dubai');
+            try {
+                new \DateTimeZone($tz);
+            } catch (\Exception) {
+                $tz = 'Asia/Dubai';
+            }
+
             $end = $r->query('end')
                 ? CarbonImmutable::parse($r->query('end'))->startOfDay()
-                : CarbonImmutable::now('Asia/Jakarta')->subDay()->startOfDay();
+                : CarbonImmutable::now($tz)->subDay()->startOfDay();
             $start = $r->query('start')
                 ? CarbonImmutable::parse($r->query('start'))->startOfDay()
                 : $end->subDays(((int) $r->query('days', 90)) - 1);
@@ -515,6 +542,129 @@ Route::middleware('api.key')->group(function (): void {
                     ->groupBy('utm_source', 'utm_medium', 'utm_campaign')
                     ->orderByRaw('SUM(bitunix_trading_volume::numeric) DESC')
                     ->get(),
+            ]);
+        });
+
+        // ===================================================================
+        // Funnel — unified GSC → GA4 → Bitunix funnel with conversion rates
+        // ===================================================================
+        Route::get('/funnel', function (Request $r) use ($window, $prevWindow, $delta) {
+            [$start, $end] = $window($r);
+            [$pStart, $pEnd] = $prevWindow($start, $end);
+
+            // GSC aggregates
+            $gscSum = fn ($s, $e) => GscDailySummary::whereBetween('date', [$s, $e])
+                ->selectRaw('COALESCE(SUM(total_clicks),0) clicks, COALESCE(SUM(total_impressions),0) impressions')
+                ->first();
+
+            // GA4 aggregates
+            $ga4Sum = fn ($s, $e) => Ga4DailyMetric::whereBetween('date', [$s, $e])
+                ->selectRaw('COALESCE(SUM(users),0) users, COALESCE(SUM(sessions),0) sessions, COALESCE(SUM(engaged_sessions),0) engaged_sessions, COALESCE(SUM(page_views),0) page_views, COALESCE(SUM(key_events),0) key_events')
+                ->first();
+
+            // GA4 events breakdown
+            $ga4Events = Ga4EventSummary::whereBetween('date', [$start, $end])
+                ->selectRaw('event_name, SUM(event_count) AS event_count, SUM(users) AS users')
+                ->groupBy('event_name')
+                ->orderByDesc('event_count')
+                ->get();
+
+            // Bitunix aggregates
+            $bxSum = fn ($s, $e) => BitunixOverview::whereBetween('date', [$s, $e])
+                ->selectRaw("COALESCE(SUM(registrations),0) registrations, COALESCE(SUM(first_deposit_users),0) first_deposit_users, COALESCE(SUM(first_trade_users),0) first_trade_users, COALESCE(SUM(commission::numeric),0) commission, COALESCE(SUM(fee::numeric),0) fee")
+                ->first();
+
+            $gsc = $gscSum($start, $end);
+            $gscP = $gscSum($pStart, $pEnd);
+            $ga4 = $ga4Sum($start, $end);
+            $ga4P = $ga4Sum($pStart, $pEnd);
+            $bx = $bxSum($start, $end);
+            $bxP = $bxSum($pStart, $pEnd);
+
+            // Daily time series for the funnel chart
+            $dailyGsc = GscDailySummary::whereBetween('date', [$start, $end])
+                ->select('date', 'total_clicks', 'total_impressions')
+                ->orderBy('date')
+                ->get()
+                ->keyBy(fn ($r) => $r->date->toDateString());
+
+            $dailyGa4 = Ga4DailyMetric::whereBetween('date', [$start, $end])
+                ->select('date', 'users', 'sessions', 'engaged_sessions', 'page_views', 'key_events')
+                ->orderBy('date')
+                ->get()
+                ->keyBy(fn ($r) => $r->date->toDateString());
+
+            $dailyBx = BitunixOverview::whereBetween('date', [$start, $end])
+                ->select('date', 'registrations', 'first_deposit_users', 'first_trade_users')
+                ->orderBy('date')
+                ->get()
+                ->keyBy(fn ($r) => $r->date->toDateString());
+
+            // Merge daily data
+            $allDates = collect()
+                ->merge($dailyGsc->keys())
+                ->merge($dailyGa4->keys())
+                ->merge($dailyBx->keys())
+                ->unique()
+                ->sort()
+                ->values();
+
+            $daily = $allDates->map(function ($date) use ($dailyGsc, $dailyGa4, $dailyBx) {
+                $g = $dailyGsc->get($date);
+                $a = $dailyGa4->get($date);
+                $b = $dailyBx->get($date);
+
+                return [
+                    'date' => $date,
+                    'impressions' => (int) ($g->total_impressions ?? 0),
+                    'clicks' => (int) ($g->total_clicks ?? 0),
+                    'users' => (int) ($a->users ?? 0),
+                    'sessions' => (int) ($a->sessions ?? 0),
+                    'engaged_sessions' => (int) ($a->engaged_sessions ?? 0),
+                    'page_views' => (int) ($a->page_views ?? 0),
+                    'key_events' => (int) ($a->key_events ?? 0),
+                    'registrations' => (int) ($b->registrations ?? 0),
+                    'first_deposit' => (int) ($b->first_deposit_users ?? 0),
+                    'first_trade' => (int) ($b->first_trade_users ?? 0),
+                ];
+            });
+
+            // Build funnel stages
+            $impressions = (int) $gsc->impressions;
+            $clicks = (int) $gsc->clicks;
+            $sessions = (int) $ga4->sessions;
+            $engagedSessions = (int) $ga4->engaged_sessions;
+            $pageViews = (int) $ga4->page_views;
+            $keyEvents = (int) $ga4->key_events;
+            $registrations = (int) $bx->registrations;
+            $firstDeposit = (int) $bx->first_deposit_users;
+            $firstTrade = (int) $bx->first_trade_users;
+
+            $rate = fn ($cur, $prev) => $prev > 0 ? round($cur / $prev, 6) : null;
+
+            $stages = [
+                ['stage' => 'Impressions', 'source' => 'GSC', 'value' => $impressions, 'delta_pct' => $delta($impressions, (int) $gscP->impressions), 'conversion_rate' => null],
+                ['stage' => 'Clicks', 'source' => 'GSC', 'value' => $clicks, 'delta_pct' => $delta($clicks, (int) $gscP->clicks), 'conversion_rate' => $rate($clicks, $impressions)],
+                ['stage' => 'Sessions', 'source' => 'GA4', 'value' => $sessions, 'delta_pct' => $delta($sessions, (int) $ga4P->sessions), 'conversion_rate' => $rate($sessions, $clicks)],
+                ['stage' => 'Engaged Sessions', 'source' => 'GA4', 'value' => $engagedSessions, 'delta_pct' => $delta($engagedSessions, (int) $ga4P->engaged_sessions), 'conversion_rate' => $rate($engagedSessions, $sessions)],
+                ['stage' => 'Page Views', 'source' => 'GA4', 'value' => $pageViews, 'delta_pct' => $delta($pageViews, (int) $ga4P->page_views), 'conversion_rate' => $rate($pageViews, $sessions)],
+                ['stage' => 'Key Events', 'source' => 'GA4', 'value' => $keyEvents, 'delta_pct' => $delta($keyEvents, (int) $ga4P->key_events), 'conversion_rate' => $rate($keyEvents, $sessions)],
+                ['stage' => 'Registrations', 'source' => 'Bitunix', 'value' => $registrations, 'delta_pct' => $delta($registrations, (int) $bxP->registrations), 'conversion_rate' => $rate($registrations, $sessions)],
+                ['stage' => 'First Deposit', 'source' => 'Bitunix', 'value' => $firstDeposit, 'delta_pct' => $delta($firstDeposit, (int) $bxP->first_deposit_users), 'conversion_rate' => $rate($firstDeposit, $registrations)],
+                ['stage' => 'First Trade', 'source' => 'Bitunix', 'value' => $firstTrade, 'delta_pct' => $delta($firstTrade, (int) $bxP->first_trade_users), 'conversion_rate' => $rate($firstTrade, $firstDeposit)],
+            ];
+
+            return response()->json([
+                'window' => ['start' => $start->toDateString(), 'end' => $end->toDateString()],
+                'previous_window' => ['start' => $pStart->toDateString(), 'end' => $pEnd->toDateString()],
+                'stages' => $stages,
+                'events' => $ga4Events,
+                'daily' => $daily,
+                'totals' => [
+                    'fee' => (string) $bx->fee,
+                    'commission' => (string) $bx->commission,
+                    'fee_delta_pct' => $delta($bx->fee, $bxP->fee),
+                ],
             ]);
         });
 

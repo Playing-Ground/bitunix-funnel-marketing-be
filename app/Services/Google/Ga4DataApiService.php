@@ -83,56 +83,65 @@ class Ga4DataApiService
      */
     public function fetchDailyMetrics(CarbonImmutable $start, CarbonImmutable $end): int
     {
-        $request = (new RunReportRequest())
-            ->setProperty($this->property)
-            ->setDimensions([new Dimension(['name' => 'date'])])
-            ->setMetrics([
-                new Metric(['name' => 'activeUsers']),
-                new Metric(['name' => 'newUsers']),
-                new Metric(['name' => 'sessions']),
-                new Metric(['name' => 'engagedSessions']),
-                new Metric(['name' => 'screenPageViews']),
-                new Metric(['name' => 'averageSessionDuration']),
-                new Metric(['name' => 'engagementRate']),
-            ])
-            ->setDateRanges([
-                new DateRange([
-                    'start_date' => $start->toDateString(),
-                    'end_date' => $end->toDateString(),
-                ]),
-            ])
-            ->setOrderBys([
-                (new OrderBy())->setDimension(
-                    (new DimensionOrderBy())->setDimensionName('date'),
-                ),
-            ])
-            ->setLimit(10000);
-
-        $response = $this->client->runReport($request);
-
+        $pageSize = 10000;
+        $offset = 0;
         $written = 0;
-        foreach ($response->getRows() as $row) {
-            $dimVals = $row->getDimensionValues();
-            $metVals = $row->getMetricValues();
-            // GA4 Data API returns date as YYYYMMDD; convert to YYYY-MM-DD
-            $rawDate = $dimVals[0]->getValue();
-            $date = substr($rawDate, 0, 4).'-'.substr($rawDate, 4, 2).'-'.substr($rawDate, 6, 2);
 
-            Ga4DailyMetric::updateOrCreate(
-                ['date' => $date],
-                [
-                    'users' => (int) $metVals[0]->getValue(),
-                    'new_users' => (int) $metVals[1]->getValue(),
-                    'sessions' => (int) $metVals[2]->getValue(),
-                    'engaged_sessions' => (int) $metVals[3]->getValue(),
-                    'page_views' => (int) $metVals[4]->getValue(),
-                    'key_events' => 0,
-                    'avg_session_duration_seconds' => (float) $metVals[5]->getValue(),
-                    'engagement_rate' => (float) $metVals[6]->getValue(),
-                ],
-            );
-            $written++;
-        }
+        do {
+            $request = (new RunReportRequest())
+                ->setProperty($this->property)
+                ->setDimensions([new Dimension(['name' => 'date'])])
+                ->setMetrics([
+                    new Metric(['name' => 'activeUsers']),
+                    new Metric(['name' => 'newUsers']),
+                    new Metric(['name' => 'sessions']),
+                    new Metric(['name' => 'engagedSessions']),
+                    new Metric(['name' => 'screenPageViews']),
+                    new Metric(['name' => 'averageSessionDuration']),
+                    new Metric(['name' => 'engagementRate']),
+                ])
+                ->setDateRanges([
+                    new DateRange([
+                        'start_date' => $start->toDateString(),
+                        'end_date' => $end->toDateString(),
+                    ]),
+                ])
+                ->setOrderBys([
+                    (new OrderBy())->setDimension(
+                        (new DimensionOrderBy())->setDimensionName('date'),
+                    ),
+                ])
+                ->setLimit($pageSize)
+                ->setOffset($offset);
+
+            $response = $this->client->runReport($request);
+
+            $pageRows = 0;
+            foreach ($response->getRows() as $row) {
+                $dimVals = $row->getDimensionValues();
+                $metVals = $row->getMetricValues();
+                $rawDate = $dimVals[0]->getValue();
+                $date = substr($rawDate, 0, 4).'-'.substr($rawDate, 4, 2).'-'.substr($rawDate, 6, 2);
+
+                Ga4DailyMetric::updateOrCreate(
+                    ['date' => $date],
+                    [
+                        'users' => (int) $metVals[0]->getValue(),
+                        'new_users' => (int) $metVals[1]->getValue(),
+                        'sessions' => (int) $metVals[2]->getValue(),
+                        'engaged_sessions' => (int) $metVals[3]->getValue(),
+                        'page_views' => (int) $metVals[4]->getValue(),
+                        'key_events' => 0,
+                        'avg_session_duration_seconds' => (float) $metVals[5]->getValue(),
+                        'engagement_rate' => (float) $metVals[6]->getValue(),
+                    ],
+                );
+                $pageRows++;
+                $written++;
+            }
+
+            $offset += $pageRows;
+        } while ($pageRows === $pageSize);
 
         Log::info('Ga4DataApiService.fetchDailyMetrics', [
             'start' => $start->toDateString(),
@@ -145,71 +154,88 @@ class Ga4DataApiService
 
     /**
      * Pulls per-(date × source × medium × campaign) acquisition rows.
+     * Paginates through all results (GA4 Data API returns max 10k per request).
      */
     public function fetchAcquisition(CarbonImmutable $start, CarbonImmutable $end): int
     {
-        $request = (new RunReportRequest())
-            ->setProperty($this->property)
-            ->setDimensions([
-                new Dimension(['name' => 'date']),
-                new Dimension(['name' => 'sessionSource']),
-                new Dimension(['name' => 'sessionMedium']),
-                new Dimension(['name' => 'sessionCampaignName']),
-            ])
-            ->setMetrics([
-                new Metric(['name' => 'activeUsers']),
-                new Metric(['name' => 'newUsers']),
-                new Metric(['name' => 'sessions']),
-                new Metric(['name' => 'engagedSessions']),
-                new Metric(['name' => 'conversions']),
-            ])
-            ->setDateRanges([
-                new DateRange([
-                    'start_date' => $start->toDateString(),
-                    'end_date' => $end->toDateString(),
-                ]),
-            ])
-            ->setLimit(10000);
-
-        $response = $this->client->runReport($request);
-
+        $pageSize = 10000;
+        $offset = 0;
         $written = 0;
-        foreach ($response->getRows() as $row) {
-            $dim = $row->getDimensionValues();
-            $met = $row->getMetricValues();
 
-            $rawDate = $dim[0]->getValue();
-            $date = substr($rawDate, 0, 4).'-'.substr($rawDate, 4, 2).'-'.substr($rawDate, 6, 2);
+        do {
+            $request = (new RunReportRequest())
+                ->setProperty($this->property)
+                ->setDimensions([
+                    new Dimension(['name' => 'date']),
+                    new Dimension(['name' => 'sessionSource']),
+                    new Dimension(['name' => 'sessionMedium']),
+                    new Dimension(['name' => 'sessionCampaignName']),
+                ])
+                ->setMetrics([
+                    new Metric(['name' => 'activeUsers']),
+                    new Metric(['name' => 'newUsers']),
+                    new Metric(['name' => 'sessions']),
+                    new Metric(['name' => 'engagedSessions']),
+                    new Metric(['name' => 'conversions']),
+                ])
+                ->setDateRanges([
+                    new DateRange([
+                        'start_date' => $start->toDateString(),
+                        'end_date' => $end->toDateString(),
+                    ]),
+                ])
+                ->setLimit($pageSize)
+                ->setOffset($offset);
 
-            $source = $dim[1]->getValue() ?: '(direct)';
-            $medium = $dim[2]->getValue() ?: '(none)';
-            $campaign = $dim[3]->getValue() ?: '(not set)';
+            $response = $this->client->runReport($request);
 
-            Ga4Acquisition::updateOrCreate(
-                [
-                    'date' => $date,
-                    'row_hash' => md5("{$source}|{$medium}|{$campaign}|"),
-                ],
-                [
-                    'source' => $source,
-                    'medium' => $medium,
-                    'campaign' => $campaign,
-                    'source_platform' => null,
-                    'users' => (int) $met[0]->getValue(),
-                    'new_users' => (int) $met[1]->getValue(),
-                    'sessions' => (int) $met[2]->getValue(),
-                    'engaged_sessions' => (int) $met[3]->getValue(),
-                    'conversions' => (int) $met[4]->getValue(),
-                    'key_events' => (int) $met[4]->getValue(),
-                ],
-            );
-            $written++;
-        }
+            $pageRows = 0;
+            foreach ($response->getRows() as $row) {
+                $dim = $row->getDimensionValues();
+                $met = $row->getMetricValues();
 
-        Log::info('Ga4DataApiService.fetchAcquisition', [
+                $rawDate = $dim[0]->getValue();
+                $date = substr($rawDate, 0, 4).'-'.substr($rawDate, 4, 2).'-'.substr($rawDate, 6, 2);
+
+                $source = $dim[1]->getValue() ?: '(direct)';
+                $medium = $dim[2]->getValue() ?: '(none)';
+                $campaign = $dim[3]->getValue() ?: '(not set)';
+
+                Ga4Acquisition::updateOrCreate(
+                    [
+                        'date' => $date,
+                        'row_hash' => md5("{$source}|{$medium}|{$campaign}|"),
+                    ],
+                    [
+                        'source' => $source,
+                        'medium' => $medium,
+                        'campaign' => $campaign,
+                        'source_platform' => null,
+                        'users' => (int) $met[0]->getValue(),
+                        'new_users' => (int) $met[1]->getValue(),
+                        'sessions' => (int) $met[2]->getValue(),
+                        'engaged_sessions' => (int) $met[3]->getValue(),
+                        'conversions' => (int) $met[4]->getValue(),
+                        'key_events' => (int) $met[4]->getValue(),
+                    ],
+                );
+                $pageRows++;
+                $written++;
+            }
+
+            $offset += $pageRows;
+
+            Log::info('Ga4DataApiService.fetchAcquisition page', [
+                'offset' => $offset,
+                'page_rows' => $pageRows,
+                'total_so_far' => $written,
+            ]);
+        } while ($pageRows === $pageSize);
+
+        Log::info('Ga4DataApiService.fetchAcquisition done', [
             'start' => $start->toDateString(),
             'end' => $end->toDateString(),
-            'rows' => $written,
+            'total_rows' => $written,
         ]);
 
         return $written;
@@ -220,44 +246,54 @@ class Ga4DataApiService
      */
     public function fetchEventCounts(CarbonImmutable $start, CarbonImmutable $end): int
     {
-        $request = (new RunReportRequest())
-            ->setProperty($this->property)
-            ->setDimensions([
-                new Dimension(['name' => 'date']),
-                new Dimension(['name' => 'eventName']),
-            ])
-            ->setMetrics([
-                new Metric(['name' => 'eventCount']),
-                new Metric(['name' => 'totalUsers']),
-            ])
-            ->setDateRanges([
-                new DateRange([
-                    'start_date' => $start->toDateString(),
-                    'end_date' => $end->toDateString(),
-                ]),
-            ])
-            ->setLimit(10000);
-
-        $response = $this->client->runReport($request);
-
+        $pageSize = 10000;
+        $offset = 0;
         $written = 0;
-        foreach ($response->getRows() as $row) {
-            $dim = $row->getDimensionValues();
-            $met = $row->getMetricValues();
 
-            $rawDate = $dim[0]->getValue();
-            $date = substr($rawDate, 0, 4).'-'.substr($rawDate, 4, 2).'-'.substr($rawDate, 6, 2);
-            $eventName = $dim[1]->getValue();
+        do {
+            $request = (new RunReportRequest())
+                ->setProperty($this->property)
+                ->setDimensions([
+                    new Dimension(['name' => 'date']),
+                    new Dimension(['name' => 'eventName']),
+                ])
+                ->setMetrics([
+                    new Metric(['name' => 'eventCount']),
+                    new Metric(['name' => 'totalUsers']),
+                ])
+                ->setDateRanges([
+                    new DateRange([
+                        'start_date' => $start->toDateString(),
+                        'end_date' => $end->toDateString(),
+                    ]),
+                ])
+                ->setLimit($pageSize)
+                ->setOffset($offset);
 
-            Ga4EventSummary::updateOrCreate(
-                ['date' => $date, 'event_name' => $eventName],
-                [
-                    'event_count' => (int) $met[0]->getValue(),
-                    'users' => (int) $met[1]->getValue(),
-                ],
-            );
-            $written++;
-        }
+            $response = $this->client->runReport($request);
+
+            $pageRows = 0;
+            foreach ($response->getRows() as $row) {
+                $dim = $row->getDimensionValues();
+                $met = $row->getMetricValues();
+
+                $rawDate = $dim[0]->getValue();
+                $date = substr($rawDate, 0, 4).'-'.substr($rawDate, 4, 2).'-'.substr($rawDate, 6, 2);
+                $eventName = $dim[1]->getValue();
+
+                Ga4EventSummary::updateOrCreate(
+                    ['date' => $date, 'event_name' => $eventName],
+                    [
+                        'event_count' => (int) $met[0]->getValue(),
+                        'users' => (int) $met[1]->getValue(),
+                    ],
+                );
+                $pageRows++;
+                $written++;
+            }
+
+            $offset += $pageRows;
+        } while ($pageRows === $pageSize);
 
         Log::info('Ga4DataApiService.fetchEventCounts', [
             'start' => $start->toDateString(),
